@@ -1,0 +1,304 @@
+---
+title: "SheltonR_Prediction_Assignment_Writeup-GBM"
+author: "Robby Shelton"
+date: "June 13, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE,
+	cache = TRUE,
+	results = 'hide'
+)
+```
+
+
+## The Problem and Approach to Finding a Solution
+Data 
+* Accelerometers on the belt, forearm, arm, and dumbell
+* Dumbell exercise in 10 repetitions for 6 participants
+Prediction
+* y = classe variable
+* x = any other variables
+* Model for Prediction of the way dumbell was done:  
+"A" = done correctly
+"B" = throwing elbows to front
+"C" = lifting dumbell only half-way
+"D" = lowering dumbbell only half-way
+"E" = throwing hips to front
+
+```{r load_libraries}
+library("readr")     # csv file importing
+library("dplyr")     # working with data
+library("tidyr")     # drop NA
+library("ggplot2")   # grammer of graphics
+library("ggthemes")  # graphics few() clean
+library("caret")     # machine learning algorithms
+library("e1071")     # in addtion to caret package, + svm
+library("here")      # make working directory here - easier to map input/output directories
+library("data.table")# %like% for parsing column names
+library("gridExtra")
+```
+## Input data
+```{r import_data}
+here()
+pml_training <- read_csv("data/input/pml-training.csv")
+pml_testing <- read_csv("data/input/pml-testing.csv")
+```
+
+Data has a lot of NAs.  There are names, and a variety of data from each device.  The variables can be characterized in the following groups.
+user, time
+Roll, pitch, yaw
+min, max, amplitude, total
+belt, arm, forearm, dumbell
+var, ave, std
+gyros, accel, magnet
+kurtosis, skewness
+
+There isn't a discrete #1-10 for repetitions for barbell exercises in each class. Ideally I would like to summarize the data by repetition.  Dumbell lift #1, #2...#10, get a min, max, average, and for this to be used for training.  But, the data provided are:
+raw_timestamp_part_1
+raw_timestamp_part_2
+cvtd_timestamp 
+new_window 
+num_window 
+
+Approach-Sludgehammer:  
+Train on all data.
+
+Approach-Component:  
+Break down to each sensor by where sensor is utilized.  Build each model, then combine these models together.  Each sensor with data is important in regards to where it is located on the body.  One type of data from one sensor may not be relevant to that same data collected on another sensor, to put simply, a vertical motion is important and most significant at the sensor worn at the hand and not the belt, where vertical motion would be hypothesized to be less.  
+
+Approach-Time-Spatial-relationships:  
+Are these data cyclic, up-down, repeat, in the same set?  If so, data in respect to time or barbell position in exercises has to also be accounted for.
+
+Way to reduce data into the 10 repetitions? 
+There are data for raw_timestamp_part_1 (very large number)
+raw_timestamp_part_2 (starts low, goes up, then back down again), cvtd_timestamp (static), new_window (yes, no), num_window (sequential), however, it was not immediately clear how to translate any of these variables to the begining and end of repetitions for the dumbbell movement in each cycle.  Ideally it would be interesting to break this data set into 10 sets representing the 10 dumbbell repitions for each session.
+
+## Data Summary, Exploration, and Creation of DataSet
+```{r data_cleanup_exploration}
+# remove any columns with NA, treat preprocessing of both training and testing the same.
+pml_training_clean <- pml_training[sapply(pml_training, function(pml_training) !any(is.na(pml_training)))] 
+pml_testing_clean <- pml_testing[sapply(pml_testing, function(pml_testing) !any(is.na(pml_testing)))]
+
+#convert classe to factor
+pml_training_clean$classe <-as.factor(pml_training_clean$classe)
+
+# Sensor-worn-at-position:  dumbbell, forearm, arm, belt
+# head(pml_training_clean[, colnames(pml_training_clean) %like% "belt"])
+summary(pml_training_clean[, colnames(pml_training_clean) %like% "belt"])
+pml_training_clean_belt <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "belt"]))
+
+# head(pml_training_clean[, colnames(pml_training_clean) %like% "forearm"])
+summary(pml_training_clean[, colnames(pml_training_clean) %like% "forearm"])
+pml_training_clean_forearm <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "forearm"]))
+
+# head(pml_training_clean[, colnames(pml_training_clean) %like% "_arm"])
+summary(pml_training_clean[, colnames(pml_training_clean) %like% "_arm"])
+pml_training_clean_arm <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "_arm"]))
+
+# head(pml_training_clean[, colnames(pml_training_clean) %like% "dumbbell"])
+summary(pml_training_clean[, colnames(pml_training_clean) %like% "dumbbell"])
+pml_training_clean_dumbbell <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "dumbbell"]))
+
+## Sensor output data:  Roll, pitch, yaw, gyros, accel
+# Hypthesize that each classe will have patterns of readings from sensor that are characteristic of that classe, in other words, the way the dumbbell exercise is conducted.  There are patterns specific to each class, however, each value has a similar distribution for the parameters which is expected to be different for each.  Looking at the dataframe of these data confirm that these data are specific to the columns selected.
+
+# summary(pml_training_clean[, colnames(pml_training_clean) %like% "roll"])
+# summary(pml_training_clean[, colnames(pml_training_clean) %like% "pitch"])
+# summary(pml_training_clean[, colnames(pml_training_clean) %like% "yaw"])
+summary(pml_training_clean[, colnames(pml_training_clean) %like% "gyros"])
+# summary(pml_training_clean[, colnames(pml_training_clean) %like% "accel"])
+
+pml_training_clean_roll <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "roll"]))
+pml_training_clean_pitch <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "pitch"]))
+pml_training_clean_yaw <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "yaw"]))
+pml_training_clean_gyros <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "gyros"]))
+pml_training_clean_accel <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "accel"]))
+
+plot_gyros <- ggplot(pml_training_clean_gyros) + geom_violin(aes(x = pml_training_clean_roll$classe, y = pml_training_clean_roll$roll_belt, color = "belt")) + geom_violin(aes(x = pml_training_clean_roll$classe, y = pml_training_clean_roll$roll_arm, color = "arm")) + geom_violin(aes(x = pml_training_clean_roll$classe, y = pml_training_clean_roll$roll_forearm, color = "forearm")) + geom_violin(aes(x = pml_training_clean_roll$classe, y = pml_training_clean_roll$roll_dumbbell, color = "dumbbell")) + theme_few() + labs(x = "classe", y = "value", title = "gryos")
+
+plot2 <- ggplot(pml_training_clean) + geom_point(aes(x=pml_training_clean$classe, y = pml_training_clean$gyros_belt_y, color = "belt")) + theme_few() + labs(x = "classe", y = "gyros_y", title = "belt")
+
+plot3 <- ggplot(pml_training_clean) + geom_point(aes(x=pml_training_clean$classe, y = pml_training_clean$gyros_dumbbell_y, color = "dumbbell")) + theme_few() + labs(x = "classe", y = "gyros_y", title = "dumbbell")
+
+# Using two of the locations, belt and dumbbell data, the gyro y variable is plotted for comparison:    
+plot_combined <- grid.arrange(plot_gyros, plot2, plot3, ncol = 3)
+
+
+## Are Classe balanced in the training dataset?
+barplot(table(pml_training_clean$classe), main = "classe")
+percent_classe <- prop.table(table(pml_training_clean$classe)) *100
+percent_classe
+
+# Based on this these data may need to be undersampled for classe "A" to have a balanced dataset across classes.
+```
+       A        B        C        D        E 
+28.43747 19.35073 17.43961 16.38977 18.38243 
+
+**How the model is built**
+## Predictive Model
+Utilizing two-step approach: first Gradient Boosted Model "GBM" used to generate model by filtering data by sensor postion, the belt, arm, forearm, and dumbbell positions.  Then building a fifth model utilizing data from all positions, for an overall combined model, was also generated.  Then these models, by sensor position, and overall, were combined in order to make a stronger predictor model.  The overall model that was built with the overall data set and not by individual locations of sensors performed the best, and this was used for the predictions.  GBM is a tree-based, boosting, and ensemble model.  
+
+```{r build_model, echo = TRUE, message = FALSE, warning = FALSE,	cache = TRUE,	results = 'hide'}
+memory.limit(16384) # use all memory
+set.seed(3433) # For Reproducible Workflow, that these analysis may be repeated with same psuedo-random number generation for algorithm
+
+inTrain = createDataPartition(pml_training_clean$classe, p = 0.50, list = FALSE)
+
+# using same data partition as above, model for each sensor position separately.
+
+pml_training_clean_belt <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "belt"]))
+pml_training_clean_belt <- cbind(pml_training_clean[3:7],pml_training_clean_belt) # taking out X1, name for each.
+
+pml_training_clean_forearm <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "forearm"]))
+pml_training_clean_forearm <- cbind(pml_training_clean[3:7],pml_training_clean_forearm)
+
+pml_training_clean_arm <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "_arm"]))
+pml_training_clean_arm <- cbind(pml_training_clean[3:7],pml_training_clean_arm)
+
+pml_training_clean_dumbbell <- data.frame(cbind(pml_training_clean[,"classe"],pml_training_clean[, colnames(pml_training_clean) %like% "dumbbell"]))
+pml_training_clean_dumbbell <- cbind(pml_training_clean[3:7],pml_training_clean_dumbbell)
+
+
+fitControl <- trainControl(method = "cv", number = 10, summaryFunction = defaultSummary) # limit number = 10
+
+# using same data inTrain to select partitioned data
+training_belt = pml_training_clean_belt[ inTrain,]  #data for "time" and "window" already removed
+testing_belt = pml_training_clean_belt[-inTrain,]  # I'm spliting my training set so that I get what the error values on the model before predicting the actual testing set of data.
+
+modFit_gbm_belt <- train(classe ~., method = "gbm", trControl = fitControl, data = training_belt)
+modFit_gbm_belt
+df_testing_modFit_gbm_belt <- predict(modFit_gbm_belt, newdata = testing_belt)
+confusionMatrix(df_testing_modFit_gbm_belt, testing_belt$classe)
+# Accuracy : 0.9963 
+
+training_arm = pml_training_clean_arm[ inTrain,]  
+testing_arm = pml_training_clean_arm[-inTrain,] 
+
+modFit_gbm_arm <- train(classe ~., method = "gbm", trControl = fitControl, data = training_arm)
+df_testing_modFit_gbm_arm <- predict(modFit_gbm_arm, newdata = testing_arm)
+confusionMatrix(df_testing_modFit_gbm_arm, testing_arm$classe)
+#   Accuracy : 0.9963      
+
+
+training_forearm = pml_training_clean_forearm[ inTrain,]  
+testing_forearm = pml_training_clean_forearm[-inTrain,] 
+
+modFit_gbm_forearm <- train(classe ~., method = "gbm", trControl = fitControl, data = training_forearm)
+df_testing_modFit_gbm_forearm <- predict(modFit_gbm_forearm, newdata = testing_forearm)
+confusionMatrix(df_testing_modFit_gbm_forearm, testing_forearm$classe)
+# Accuracy : 0.9972 
+
+
+training_dumbbell = pml_training_clean_dumbbell[ inTrain,]  
+testing_dumbbell = pml_training_clean_dumbbell[-inTrain,] 
+
+modFit_gbm_dumbbell <- train(classe ~., method = "gbm", trControl = fitControl, data = training_dumbbell)
+df_testing_modFit_gbm_dumbbell <- predict(modFit_gbm_dumbbell, newdata = testing_dumbbell)
+confusionMatrix(df_testing_modFit_gbm_dumbbell, testing_dumbbell$classe)
+#  Accuracy : 0.9977 
+
+
+# saving the big model for last since it takes a while to run.
+pml_training_clean_all <- pml_training_clean[3:ncol(pml_training_clean)]
+
+training = pml_training_clean[ inTrain,]  
+testing = pml_training_clean[-inTrain,]  
+
+modFit_gbm_all <- train(classe ~., method = "gbm", trControl = fitControl, data = training)
+df_testing_modFit_gbm_all <- predict(modFit_gbm_all, newdata = testing)
+confusionMatrix(df_testing_modFit_gbm_all, testing$classe)
+#  Accuracy : 0.9998  
+
+# combine predictors together to see if better predictor and accuracy may be achieved.
+pred1 <- predict(modFit_gbm_forearm, testing)
+pred2 <- predict(modFit_gbm_arm, testing)
+pred3 <- predict(modFit_gbm_belt, testing)
+pred4 <- predict(modFit_gbm_dumbbell, testing)
+pred5 <- predict(modFit_gbm_all, testing)
+
+df_pred_gbm <- data.frame(pred1, pred2, pred3, pred4, pred5, classe = testing$classe)
+
+combModFit_gbm <- train(classe ~., method="gbm", trControl = fitControl, data = df_pred_gbm)
+df_testing_combModFit_gbm <- predict(combModFit_gbm, newdata = testing)
+confusionMatrix(df_testing_combModFit_gbm, testing$classe)
+# Accuracy : 0.9998  
+
+#  The combination of all data is the best model, and is similar accuracy to the combined model based on sensor location and overall model.
+print(modFit_gbm_all$finalModel)
+trellis.par.set(caretTheme())
+plot(modFit_gbm_all, metric = "Kappa", plotType = "level",
+     scales = list(x = list(rot = 90)))
+
+
+```
+
+**How cross-validation done**
+These data in training dataset were partitioned, 50% for training, and 50% for validation and determination of error for the models.  Specifically, inTrain = createDataPartition(pml_training_clean$classe, p = 0.5, list = FALSE).  Further validation was done with the predictive model as cross-validation is done to find the optimal tree during iterations.
+
+** What is expected out of sample error **
+Out of sample error rate is the error rate you get on a new data set.  This is calculated using the data set asided from the training set and model building.
+```{r out_of_sample_error}
+AccuracyResults <- modFit_gbm_all$results
+OOSE <- 1- AccuracyResults$Accuracy[1]
+print(paste("expected out of sample error, or generalization error =", OOSE))
+```
+
+**Decisions**
+These data didn't allow me to use glm, therefore gbm or random forrest were both models that are applicable.  
+
+Sensor position is important, and each would have unique patterns in data that correspond to the type of motion in that location.  This is why I allocated the positions data separately and together in order to make a combined model that took advantage of each postions pattern of data as well as all together.
+
+I was stuck on how ten repetitions could be pulled out of the data, such that a window of time for one replicate of dumbbell motion could be analyzed as a window of data, repeated ten times.  
+
+**Predict 20 different test cases**
+```{r belt_prediction}
+pml_testing_clean <- pml_testing_clean[3:ncol(pml_testing_clean)]
+pml_testing_predict <- predict(modFit_gbm_belt, newdata = pml_testing_clean)
+
+histogram(pml_testing_predict)
+
+# Model used for predictions, most practical for study participant to use one fitness tracker in one location rather than 4 for practical use.
+confusionMatrix(df_testing_modFit_gbm_belt, testing_belt$classe)
+
+pml_testing_predict_comb <- predict(combModFit_gbm, newdata = pml_testing_clean)
+histogram(pml_testing_predict_comb)
+
+model_predict <-modFit_gbm_belt
+print(paste("1", predict(model_predict, newdata = pml_testing_clean[1,])))
+print(paste("2", predict(model_predict, newdata = pml_testing_clean[2,])))
+print(paste("3", predict(model_predict, newdata = pml_testing_clean[3,])))
+print(paste("4", predict(model_predict, newdata = pml_testing_clean[4,])))
+print(paste("5", predict(model_predict, newdata = pml_testing_clean[5,])))
+print(paste("6", predict(model_predict, newdata = pml_testing_clean[6,])))
+print(paste("7", predict(model_predict, newdata = pml_testing_clean[7,])))
+print(paste("8", predict(model_predict, newdata = pml_testing_clean[8,])))
+print(paste("9", predict(model_predict, newdata = pml_testing_clean[9,])))
+print(paste("10", predict(model_predict, newdata = pml_testing_clean[10,])))
+print(paste("11", predict(model_predict, newdata = pml_testing_clean[11,])))
+print(paste("12", predict(model_predict, newdata = pml_testing_clean[12,])))
+print(paste("13", predict(model_predict, newdata = pml_testing_clean[13,])))
+print(paste("14", predict(model_predict, newdata = pml_testing_clean[14,])))
+print(paste("15", predict(model_predict, newdata = pml_testing_clean[15,])))
+print(paste("16", predict(model_predict, newdata = pml_testing_clean[16,])))
+print(paste("17", predict(model_predict, newdata = pml_testing_clean[17,])))
+print(paste("18", predict(model_predict, newdata = pml_testing_clean[18,])))
+print(paste("19", predict(model_predict, newdata = pml_testing_clean[19,])))
+print(paste("20", predict(model_predict, newdata = pml_testing_clean[20,])))
+```
+
+**Citation**
+Citation
+Ugulino,W.; Cardador,D.; Vega,K.; Velloso,E.; Milidiu, R.; Fuks, H. WearableComputing: Accelerometers' Data Classification of Body Posturesand Movements. Proceedings of 21st Brazilian Symposium onArtificial Intelligence. Advances in Artificial Intelligence - SBIA2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba,PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI:10.1007/978-3-642-34459-6_6. 
+
+**Data**
+http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har:
+* training data
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+* testing data
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
